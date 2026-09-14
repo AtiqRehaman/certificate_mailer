@@ -2,14 +2,16 @@ import os
 import ssl
 import smtplib
 import threading
+import time
 from pathlib import Path
 from email.message import EmailMessage
 from tkinter import (
     Tk, Label, Button, Entry, StringVar, Text, END, filedialog,
-    messagebox, DoubleVar, Spinbox, Frame
+    messagebox, DoubleVar, Spinbox, Frame, Canvas, Scrollbar, VERTICAL, RIGHT, LEFT, Y, BOTH
 )
 
 import pandas as pd
+import csv
 from PIL import Image, ImageDraw, ImageFont
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
@@ -22,7 +24,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 # Coordinates calibrated for the supplied 1450x1000 certificate.
 # They scale automatically if the Canva export has a different resolution.
 DEFAULT_NAME_X = 725
-DEFAULT_NAME_Y = 460
+DEFAULT_NAME_Y = 465
 DEFAULT_FONT_SIZE = 46
 
 
@@ -31,6 +33,39 @@ class CertificateMailer:
         self.root = root
         root.title("Bulk Certificate Mailer")
         root.geometry("900x760")
+        root.minsize(700, 500)
+
+        # Scrollable main interface so all controls remain accessible.
+        outer = Frame(root)
+        outer.pack(fill=BOTH, expand=True)
+
+        canvas = Canvas(outer, highlightthickness=0)
+        scrollbar = Scrollbar(outer, orient=VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=RIGHT, fill=Y)
+        canvas.pack(side=LEFT, fill=BOTH, expand=True)
+
+        content = Frame(canvas)
+        window_id = canvas.create_window((0, 0), window=content, anchor="nw")
+
+        def update_scroll_region(event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def resize_content(event):
+            canvas.itemconfigure(window_id, width=event.width)
+
+        content.bind("<Configure>", update_scroll_region)
+        canvas.bind("<Configure>", resize_content)
+
+        def mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        canvas.bind_all("<MouseWheel>", mousewheel)
+        canvas.bind_all("<Button-4>", lambda event: canvas.yview_scroll(-1, "units"))
+        canvas.bind_all("<Button-5>", lambda event: canvas.yview_scroll(1, "units"))
+
+        # All following widgets are placed inside the scrollable content frame.
+        root = content
 
         self.template = None
         self.data = None
@@ -49,6 +84,13 @@ class CertificateMailer:
               font=("Arial", 22, "bold")).pack(pady=(15, 4))
         Label(root, text="Generate personalized certificates and email them individually.",
               font=("Arial", 11)).pack(pady=(0, 15))
+
+        generator=Frame(root, relief="groove", borderwidth=1); generator.pack(fill="x", padx=20, pady=10)
+        Label(generator,text="CSV Generator",font=("Arial",12,"bold")).pack(anchor="w",padx=10,pady=5)
+        Label(generator,text="Paste one participant per line: Name,Email").pack(anchor="w",padx=10)
+        self.csv_input=Text(generator,height=5); self.csv_input.pack(fill="x",padx=10,pady=5)
+        self.csv_input.insert("1.0","Atiq Rehaman Shaik,atiqrehamanshaik@gmail.com\nVinay,vinaych6640@gmail.com\nLokesh,hanumanthulokesh754@gmail.com")
+        Button(generator,text="Generate Participants CSV",command=self.generate_csv).pack(anchor="e",padx=10,pady=5)
 
         top = Frame(root)
         top.pack(fill="x", padx=20)
@@ -94,7 +136,7 @@ class CertificateMailer:
         self.body.pack(fill="x", padx=20)
         self.body.insert("1.0",
             "Dear {name},\n\n"
-            "Thank you for participating in the Technical Quiz Competition. We truly appreciate your enthusiasm and effort. Please find your certificate attached.\n"
+            "Thank you for participating in the Technical Quiz Competition. We truly appreciate your enthusiasm and effort. Please find your certificate attached.\n\n"
             "Regards,\n"
             "Association of Computer Geeks (ACG)\n"
             "LBRCE")
@@ -113,6 +155,22 @@ class CertificateMailer:
 
         Label(root, text="Expected columns: Name, Email. Optional: Certificate_ID",
               font=("Arial", 9)).pack(pady=4)
+
+    def generate_csv(self):
+        raw = self.csv_input.get("1.0", END).strip()
+        rows=[]
+        for line in raw.splitlines():
+            if not line.strip() or line.lower().startswith("name,email"): continue
+            parts=[p.strip() for p in line.split(",",1)]
+            if len(parts)==2 and "@" in parts[1]:
+                rows.append({"Name":parts[0],"Email":parts[1],"Certificate_ID":f"CERT-{len(rows)+1:03d}"})
+        if not rows:
+            messagebox.showwarning("CSV Generator","Enter valid Name,Email rows."); return
+        path=filedialog.asksaveasfilename(defaultextension=".csv",initialfile="participants.csv",filetypes=[("CSV files","*.csv")])
+        if not path: return
+        with open(path,"w",newline="",encoding="utf-8-sig") as f:
+            w=csv.DictWriter(f,fieldnames=["Name","Email","Certificate_ID"]); w.writeheader(); w.writerows(rows)
+        messagebox.showinfo("CSV Created",f"Created {len(rows)} participants.")
 
     def choose_template(self):
         path = filedialog.askopenfilename(
@@ -273,7 +331,8 @@ class CertificateMailer:
                     pdf = self.make_certificate(name, cert_id)
 
                     msg = EmailMessage()
-                    msg["Subject"] = self.subject_var.get()
+                    base_subject = self.subject_var.get().strip()
+                    msg["Subject"] = f"{name} - {base_subject}"
                     msg["From"] = self.sender_var.get().strip()
                     msg["To"] = recipient
                     msg.set_content(body_template.replace("{name}", name))
@@ -289,6 +348,13 @@ class CertificateMailer:
                     server.send_message(msg)
                     sent += 1
                     self.status.set(f"Sent {sent}/{total}: {name}")
+
+                    # Small delay between messages to avoid burst-like sending.
+                    time.sleep(5)
+                    # Longer pause after every 5 messages.
+                    if i % 5 == 0 and i < total:
+                        self.status.set(f"Sent {sent}/{total}. Waiting 30 seconds before next batch...")
+                        time.sleep(30)
 
             self.status.set(f"Finished. Successfully sent {sent}/{total}.")
             messagebox.showinfo("Bulk send complete", f"Sent {sent}/{total} certificates.")
