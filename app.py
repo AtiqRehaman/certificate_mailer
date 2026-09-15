@@ -28,6 +28,11 @@ DEFAULT_NAME_Y = 465
 DEFAULT_FONT_SIZE = 46
 
 
+def normalize_email(value):
+    """Return the address trimmed and lowercase without validating its format."""
+    return str(value).strip().lower()
+
+
 class CertificateMailer:
     def __init__(self, root):
         self.root = root
@@ -87,9 +92,19 @@ class CertificateMailer:
 
         generator=Frame(root, relief="groove", borderwidth=1); generator.pack(fill="x", padx=20, pady=10)
         Label(generator,text="CSV Generator",font=("Arial",12,"bold")).pack(anchor="w",padx=10,pady=5)
-        Label(generator,text="Paste one participant per line: Name,Email").pack(anchor="w",padx=10)
-        self.csv_input=Text(generator,height=5); self.csv_input.pack(fill="x",padx=10,pady=5)
-        self.csv_input.insert("1.0","Atiq Rehaman Shaik,atiqrehamanshaik@gmail.com\nVinay,vinaych6640@gmail.com\nLokesh,hanumanthulokesh754@gmail.com")
+        Label(generator,text="Enter names and Gmail addresses in the same order.").pack(anchor="w",padx=10)
+        fields = Frame(generator)
+        fields.pack(fill="x", padx=10, pady=5)
+        Label(fields, text="Names (one per line)").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        Label(fields, text="Gmail addresses (one per line)").grid(row=0, column=1, sticky="w")
+        self.names_input = Text(fields, height=6, wrap="word")
+        self.mails_input = Text(fields, height=6, wrap="word")
+        self.names_input.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
+        self.mails_input.grid(row=1, column=1, sticky="nsew")
+        fields.columnconfigure(0, weight=1)
+        fields.columnconfigure(1, weight=1)
+        self.names_input.insert("1.0", "Atiq Rehaman Shaik\nVinay\nLokesh")
+        self.mails_input.insert("1.0", "atiqrehamanshaik@gmail.com\nvinaych6640@gmail.com\nhanumanthulokesh754@gmail.com")
         Button(generator,text="Generate Participants CSV",command=self.generate_csv).pack(anchor="e",padx=10,pady=5)
 
         top = Frame(root)
@@ -157,20 +172,26 @@ class CertificateMailer:
               font=("Arial", 9)).pack(pady=4)
 
     def generate_csv(self):
-        raw = self.csv_input.get("1.0", END).strip()
-        rows=[]
-        for line in raw.splitlines():
-            if not line.strip() or line.lower().startswith("name,email"): continue
-            parts=[p.strip() for p in line.split(",",1)]
-            if len(parts)==2 and "@" in parts[1]:
-                rows.append({"Name":parts[0],"Email":parts[1],"Certificate_ID":f"CERT-{len(rows)+1:03d}"})
+        names = [line.strip() for line in self.names_input.get("1.0", END).splitlines() if line.strip()]
+        mails = [line.strip() for line in self.mails_input.get("1.0", END).splitlines() if line.strip()]
+        if len(names) != len(mails):
+            messagebox.showwarning("CSV Generator", "The number of names and Gmail addresses must be the same.")
+            return
+        rows = []
+        for index, (name, mail) in enumerate(zip(names, mails), start=1):
+            mail = normalize_email(mail)
+            rows.append({"Name": name, "Email": mail, "Certificate_ID": f"CERT-{index:03d}"})
         if not rows:
-            messagebox.showwarning("CSV Generator","Enter valid Name,Email rows."); return
-        path=filedialog.asksaveasfilename(defaultextension=".csv",initialfile="participants.csv",filetypes=[("CSV files","*.csv")])
-        if not path: return
-        with open(path,"w",newline="",encoding="utf-8-sig") as f:
-            w=csv.DictWriter(f,fieldnames=["Name","Email","Certificate_ID"]); w.writeheader(); w.writerows(rows)
-        messagebox.showinfo("CSV Created",f"Created {len(rows)} participants.")
+            messagebox.showwarning("CSV Generator", "Enter at least one name and email.")
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".csv", initialfile="participants.csv", filetypes=[("CSV files", "*.csv")])
+        if not path:
+            return
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=["Name", "Email", "Certificate_ID"])
+            writer.writeheader()
+            writer.writerows(rows)
+        messagebox.showinfo("CSV Created", f"Created {len(rows)} participants.")
 
     def choose_template(self):
         path = filedialog.askopenfilename(
@@ -195,6 +216,7 @@ class CertificateMailer:
             missing = required - set(self.data.columns)
             if missing:
                 raise ValueError(f"Missing columns: {', '.join(sorted(missing))}")
+            self.data["Email"] = self.data["Email"].map(normalize_email)
             self.excel_var.set(f"{path}  ({len(self.data)} recipients)")
             self.status.set(f"Loaded {len(self.data)} recipients.")
         except Exception as e:
@@ -230,6 +252,21 @@ class CertificateMailer:
                 return ImageFont.truetype(p, size)
         return ImageFont.load_default()
 
+    def adaptive_font_size(self, name, base_size):
+        """Reduce font size for longer names while keeping short names at the configured size."""
+        length = len(str(name).strip())
+        if length <= 18:
+            factor = 1.00
+        elif length <= 24:
+            factor = 0.90
+        elif length <= 30:
+            factor = 0.80
+        elif length <= 38:
+            factor = 0.70
+        else:
+            factor = 0.60
+        return max(18, int(base_size * factor))
+
     def make_certificate(self, name, cert_id=None):
         if not self.template:
             raise ValueError("Choose a certificate template first.")
@@ -241,6 +278,7 @@ class CertificateMailer:
         x, y, size = x * sx, y * sy, int(size * ((sx + sy) / 2))
 
         draw = ImageDraw.Draw(image)
+        size = self.adaptive_font_size(name, size)
         fnt = self.font(size)
 
         # Center the participant name at the configured X coordinate.
@@ -296,9 +334,9 @@ class CertificateMailer:
         if self.data is None:
             messagebox.showwarning("Send", "Load the participant Excel/CSV first.")
             return
-        sender = self.sender_var.get().strip()
+        sender = normalize_email(self.sender_var.get())
         password = self.password_var.get().strip()
-        if not sender or not password:
+        if not password:
             messagebox.showwarning(
                 "Gmail setup",
                 "Enter your Gmail address and a Gmail App Password.\n\n"
@@ -316,38 +354,48 @@ class CertificateMailer:
         try:
             self.status.set("Generating certificates and connecting to Gmail...")
             context = ssl.create_default_context()
+            sender = normalize_email(self.sender_var.get())
             with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
-                server.login(self.sender_var.get().strip(), self.password_var.get().strip())
+                server.login(sender, self.password_var.get().strip())
 
                 body_template = self.body.get("1.0", END).strip()
                 total = len(self.data)
                 sent = 0
+                failed = []
 
                 for i, (_, row) in enumerate(self.data.iterrows(), start=1):
                     name = str(row["Name"]).strip()
-                    recipient = str(row["Email"]).strip()
+                    recipient = normalize_email(row["Email"])
                     cert_id = row.get("Certificate_ID")
 
-                    pdf = self.make_certificate(name, cert_id)
+                    try:
+                        pdf = self.make_certificate(name, cert_id)
 
-                    msg = EmailMessage()
-                    base_subject = self.subject_var.get().strip()
-                    msg["Subject"] = f"{name} - {base_subject}"
-                    msg["From"] = self.sender_var.get().strip()
-                    msg["To"] = recipient
-                    msg.set_content(body_template.replace("{name}", name))
+                        msg = EmailMessage()
+                        base_subject = self.subject_var.get().strip()
+                        msg["Subject"] = f"{name} - {base_subject}"
+                        msg["From"] = sender
+                        msg["To"] = recipient
+                        msg.set_content(body_template.replace("{name}", name))
 
-                    with open(pdf, "rb") as f:
-                        msg.add_attachment(
-                            f.read(),
-                            maintype="application",
-                            subtype="pdf",
-                            filename=pdf.name
-                        )
+                        with open(pdf, "rb") as f:
+                            msg.add_attachment(
+                                f.read(),
+                                maintype="application",
+                                subtype="pdf",
+                                filename=pdf.name
+                            )
 
-                    server.send_message(msg)
-                    sent += 1
-                    self.status.set(f"Sent {sent}/{total}: {name}")
+                        server.send_message(msg)
+                        sent += 1
+                        self.status.set(f"Sent {sent}/{total}: {name}")
+                    except Exception as error:
+                        failed.append({
+                            "Name": name,
+                            "Email": recipient,
+                            "Error": str(error),
+                        })
+                        self.status.set(f"Failed {i}/{total}: {recipient}")
 
                     # Small delay between messages to avoid burst-like sending.
                     time.sleep(5)
@@ -356,8 +404,16 @@ class CertificateMailer:
                         self.status.set(f"Sent {sent}/{total}. Waiting 30 seconds before next batch...")
                         time.sleep(30)
 
-            self.status.set(f"Finished. Successfully sent {sent}/{total}.")
-            messagebox.showinfo("Bulk send complete", f"Sent {sent}/{total} certificates.")
+            failed_path = OUTPUT_DIR / "failed_emails.csv"
+            with open(failed_path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.DictWriter(f, fieldnames=["Name", "Email", "Error"])
+                writer.writeheader()
+                writer.writerows(failed)
+
+            self.status.set(f"Finished. Successfully sent {sent}/{total}. Failed: {len(failed)}.")
+            summary = f"Sent {sent}/{total} certificates."
+            summary += f"\nFailed emails saved to:\n{failed_path}"
+            messagebox.showinfo("Bulk send complete", summary)
         except Exception as e:
             self.status.set("Sending stopped because of an error.")
             messagebox.showerror("Email error", str(e))
